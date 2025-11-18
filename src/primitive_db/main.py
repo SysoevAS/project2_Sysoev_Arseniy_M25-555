@@ -1,10 +1,13 @@
-#!/usr/bin/env python3
-"""Точка входа в проект primitive_db."""
+"""Точка входа в приложение primitive_db."""
+
+from .engine import run, welcome
 
 
 def main() -> None:
-    """Выводит простое сообщение при запуске пакета."""
+    """Запускает приветствие и основной цикл."""
     print("DB project is running!")
+    welcome()
+    run()
 
 
 if __name__ == "__main__":
