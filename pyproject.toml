@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "project2_Sysoev_Arseniy-m25-555"
+version = "0.1.0"
+description = "Учебный проект: примитивная база данных."
+authors = ["Arseniy Sysoev <ivetys@gmail.com>"]
+packages = [
+    { include = "src" },
+]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+
+[tool.poetry.scripts]
+project = "src.primitive_db.main:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
