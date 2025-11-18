@@ -1,31 +1,65 @@
-"""Игровой цикл и парсинг команд для примитивной БД."""
+#!/usr/bin/env python3
+"""Точка входа и игровой цикл для примитивной базы данных."""
 
 import shlex
-from typing import List, Tuple
 
 import prompt
+from prettytable import PrettyTable
 
+from . import core
+from . import parser as db_parser
 from .constants import META_FILE
-from .core import create_table, drop_table
-from .utils import load_metadata, save_metadata
+from .decorators import (
+    confirm_action,
+    create_cacher,
+    handle_db_errors,
+    log_time,
+)
+from .utils import (
+    load_metadata,
+    load_table_data,
+    save_metadata,
+    save_table_data,
+)
+
+SELECT_CACHE = create_cacher()
 
 
 def print_help() -> None:
-    """Печатает справку по доступным командам."""
-    print("\n***База данных***\n")
+    """Печатает справочную информацию по доступным командам."""
+    print("\n***Процесс работы с таблицей***")
     print("Функции:")
-    print(
-        "<command> create_table <имя_таблицы> <столбец1:тип> <столбец2:тип> .. "
-        "- создать таблицу",
-    )
+    print("<command> create_table <имя_таблицы> <столбец1:тип> .. - создать таблицу")
     print("<command> list_tables - показать список всех таблиц")
     print("<command> drop_table <имя_таблицы> - удалить таблицу")
+
+    print("\n***Операции с данными***")
+    print(
+        "<command> insert into <имя_таблицы> values "
+        "(<значение1>, <значение2>, ...) - создать запись."
+    )
+    print(
+        "<command> select from <имя_таблицы> where <столбец> = <значение> "
+        "- прочитать записи по условию."
+    )
+    print("<command> select from <имя_таблицы> - прочитать все записи.")
+    print(
+        "<command> update <имя_таблицы> set <столбец1> = <новое_значение1> "
+        "where <столбец_условия> = <значение_условия> - обновить запись."
+    )
+    print(
+        "<command> delete from <имя_таблицы> where <столбец> = <значение> "
+        "- удалить запись."
+    )
+    print("<command> info <имя_таблицы> - вывести информацию о таблице.")
+
+    print("\nОбщие команды:")
     print("<command> exit - выход из программы")
     print("<command> help - справочная информация\n")
 
 
 def welcome() -> None:
-    """Простое приветствие через prompt."""
+    """Начальное приветствие и пример работы команды help."""
     name = prompt.string("May I have your name? ")
     if not name:
         name = "user"
@@ -37,50 +71,52 @@ def welcome() -> None:
     print("Введите команду: help\n")
 
 
-def _parse_columns(tokens: List[str]) -> List[Tuple[str, str]]:
-    """Парсит список столбцов вида name:type."""
-    columns: List[Tuple[str, str]] = []
-    for token in tokens:
-        if ":" not in token:
-            raise ValueError(
-                f"Некорректное значение: {token}. Попробуйте снова.",
-            )
-        name, col_type = token.split(":", 1)
-        name = name.strip()
-        col_type = col_type.strip()
-        if not name or not col_type:
-            raise ValueError(
-                f"Некорректное значение: {token}. Попробуйте снова.",
-            )
-        columns.append((name, col_type))
-    return columns
-
-
-def _handle_create_table(tokens: List[str]) -> None:
-    """Обрабатывает команду create_table."""
+@handle_db_errors
+def handle_create_table(tokens: list[str]) -> None:
+    """Создание таблицы по команде create_table."""
     if len(tokens) < 3:
         raise ValueError(
             "Некорректное значение: недостаточно аргументов. Попробуйте снова.",
         )
 
     table_name = tokens[1]
-    raw_columns = tokens[2:]
-    columns = _parse_columns(raw_columns)
+    columns_tokens = tokens[2:]
+    columns = db_parser.parse_columns(columns_tokens)
 
     metadata = load_metadata(META_FILE)
-    metadata = create_table(metadata, table_name, columns)
+    metadata = core.create_table(metadata, table_name, columns)
     save_metadata(META_FILE, metadata)
 
-    cols_info = metadata[table_name]["columns"]
-    cols_str = ", ".join(f'{c["name"]}:{c["type"]}' for c in cols_info)
+    columns_info = metadata[table_name]["columns"]
+    cols_as_str = ", ".join(
+        f'{c["name"]}:{c["type"]}' for c in columns_info
+    )
     print(
         f'Таблица "{table_name}" успешно создана '
-        f"со столбцами: {cols_str}",
+        f"со столбцами: {cols_as_str}",
     )
 
 
-def _handle_list_tables() -> None:
-    """Обрабатывает команду list_tables."""
+@handle_db_errors
+@confirm_action("удаление таблицы")
+def handle_drop_table(tokens: list[str]) -> None:
+    """Удаление таблицы по команде drop_table."""
+    if len(tokens) != 2:
+        raise ValueError(
+            "Некорректное значение: нужно указать имя таблицы. "
+            "Попробуйте снова.",
+        )
+
+    table_name = tokens[1]
+    metadata = load_metadata(META_FILE)
+    metadata = core.drop_table(metadata, table_name)
+    save_metadata(META_FILE, metadata)
+    print(f'Таблица "{table_name}" успешно удалена.')
+
+
+@handle_db_errors
+def handle_list_tables() -> None:
+    """Вывод списка таблиц."""
     metadata = load_metadata(META_FILE)
     if not metadata:
         print("Таблиц пока нет.")
@@ -90,8 +126,109 @@ def _handle_list_tables() -> None:
         print(f"- {name}")
 
 
-def _handle_drop_table(tokens: List[str]) -> None:
-    """Обрабатывает команду drop_table."""
+@handle_db_errors
+@log_time
+def handle_insert(command: str) -> None:
+    """Обработка команды insert."""
+    table_name, values = db_parser.parse_insert_command(command)
+
+    metadata = load_metadata(META_FILE)
+    table_data = load_table_data(table_name)
+    table_data, new_id = core.insert_row(metadata, table_name, values, table_data)
+    save_table_data(table_name, table_data)
+    print(
+        f'Запись с ID={new_id} успешно добавлена в таблицу "{table_name}".',
+    )
+
+
+@handle_db_errors
+@log_time
+def handle_select(command: str) -> None:
+    """Обработка команды select."""
+    table_name, where_clause = db_parser.parse_select_command(command)
+
+    def compute():
+        metadata = load_metadata(META_FILE)
+        table_data = load_table_data(table_name)
+        return core.select_rows(metadata, table_name, table_data, where_clause)
+
+    cache_key = (table_name, None)
+    if where_clause:
+        cache_key = (table_name, tuple(sorted(where_clause.items())))
+
+    rows = SELECT_CACHE(cache_key, compute)
+    if not rows:
+        print("Записей не найдено.")
+        return
+
+    field_names = list(rows[0].keys())
+    table = PrettyTable()
+    table.field_names = field_names
+    for row in rows:
+        table.add_row([row.get(name, "") for name in field_names])
+
+    print(table)
+
+
+@handle_db_errors
+@log_time
+def handle_update(command: str) -> None:
+    """Обработка команды update."""
+    table_name, set_clause, where_clause = db_parser.parse_update_command(command)
+
+    metadata = load_metadata(META_FILE)
+    table_data = load_table_data(table_name)
+    table_data, updated_ids = core.update_rows(
+        metadata,
+        table_name,
+        table_data,
+        set_clause,
+        where_clause,
+    )
+    save_table_data(table_name, table_data)
+
+    if not updated_ids:
+        print("Подходящих записей не найдено.")
+        return
+
+    ids_str = ", ".join(str(x) for x in updated_ids)
+    print(
+        f"Записи с ID={ids_str} в таблице "
+        f'"{table_name}" успешно обновлены.',
+    )
+
+
+@handle_db_errors
+@confirm_action("удаление записей")
+@log_time
+def handle_delete(command: str) -> None:
+    """Обработка команды delete."""
+    table_name, where_clause = db_parser.parse_delete_command(command)
+
+    metadata = load_metadata(META_FILE)
+    table_data = load_table_data(table_name)
+    table_data, deleted_ids = core.delete_rows(
+        metadata,
+        table_name,
+        table_data,
+        where_clause,
+    )
+    save_table_data(table_name, table_data)
+
+    if not deleted_ids:
+        print("Подходящих записей не найдено.")
+        return
+
+    ids_str = ", ".join(str(x) for x in deleted_ids)
+    print(
+        f"Записи с ID={ids_str} успешно удалены "
+        f'из таблицы "{table_name}".',
+    )
+
+
+@handle_db_errors
+def handle_info(tokens: list[str]) -> None:
+    """Вывод информации о таблице."""
     if len(tokens) != 2:
         raise ValueError(
             "Некорректное значение: нужно указать имя таблицы. "
@@ -100,13 +237,13 @@ def _handle_drop_table(tokens: List[str]) -> None:
 
     table_name = tokens[1]
     metadata = load_metadata(META_FILE)
-    metadata = drop_table(metadata, table_name)
-    save_metadata(META_FILE, metadata)
-    print(f'Таблица "{table_name}" успешно удалена.')
+    table_data = load_table_data(table_name)
+    info = core.get_table_info(metadata, table_name, table_data)
+    print(info)
 
 
 def run() -> None:
-    """Основной цикл обработки команд."""
+    """Основной цикл программы."""
     while True:
         try:
             user_input = input("Введите команду: ").strip()
@@ -117,39 +254,37 @@ def run() -> None:
         if not user_input:
             continue
 
+        lower = user_input.lower()
+
+        if lower in {"exit", "quit"}:
+            print("Выход из программы.")
+            break
+
+        if lower == "help":
+            print_help()
+            continue
+
         tokens = shlex.split(user_input)
         if not tokens:
             continue
 
         command = tokens[0]
 
-        if command == "exit":
-            print("Выход из программы.")
-            break
-
-        if command == "help":
-            print_help()
-            continue
-
         if command == "create_table":
-            try:
-                _handle_create_table(tokens)
-            except ValueError as exc:
-                print(exc)
-            continue
-
-        if command == "list_tables":
-            try:
-                _handle_list_tables()
-            except ValueError as exc:
-                print(exc)
-            continue
-
-        if command == "drop_table":
-            try:
-                _handle_drop_table(tokens)
-            except ValueError as exc:
-                print(exc)
-            continue
-
-        print(f"Функции {command} нет. Попробуйте снова.")
+            handle_create_table(tokens)
+        elif command == "list_tables":
+            handle_list_tables()
+        elif command == "drop_table":
+            handle_drop_table(tokens)
+        elif lower.startswith("insert into"):
+            handle_insert(user_input)
+        elif lower.startswith("select"):
+            handle_select(user_input)
+        elif lower.startswith("update"):
+            handle_update(user_input)
+        elif lower.startswith("delete"):
+            handle_delete(user_input)
+        elif command == "info":
+            handle_info(tokens)
+        else:
+            print(f"Функции {command} нет. Попробуйте снова.")
